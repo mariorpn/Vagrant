@@ -1,0 +1,156 @@
+# -*- mode: ruby -*-
+# vi: set ft=ruby :
+
+servers=[
+
+  {
+     :hostname => "etcd01",
+     :ip => "172.16.0.11",
+     :box => "centos/7",
+     :ram => 2048,
+     :cpu => 2
+  },
+  {
+     :hostname => "etcd02",
+     :ip => "172.16.0.12",
+     :box => "centos/7",
+     :ram => 2048,
+     :cpu => 2
+  },
+  {
+     :hostname => "etcd03",
+     :ip => "172.16.0.13",
+     :box => "centos/7",
+     :ram => 2048,
+     :cpu => 2
+  },
+  {
+     :hostname => "controlplane01",
+     :ip => "172.16.0.14",
+     :box => "centos/7",
+     :ram => 1024,
+     :cpu => 4
+  },
+  {
+     :hostname => "controlplane02",
+     :ip => "172.16.0.15",
+     :box => "centos/7",
+     :ram => 1024,
+     :cpu => 4
+  },
+  {
+     :hostname => "controlplane03",
+     :ip => "172.16.0.16",
+     :box => "centos/7",
+     :ram => 1024,
+     :cpu => 4
+  },
+  {
+     :hostname => "worker01",
+     :ip => "172.16.0.17",
+     :box => "centos/7",
+     :ram => 2048,
+     :cpu => 2
+  },
+  {
+     :hostname => "worker02",
+     :ip => "172.16.0.18",
+     :box => "centos/7",
+     :ram => 2048,
+     :cpu => 2
+  },
+  {
+     :hostname => "worker03",
+     :ip => "172.16.0.19",
+     :box => "centos/7",
+     :ram => 2048,
+     :cpu => 2
+  }
+  
+]
+
+Vagrant.configure(2) do |config|
+  servers.each do |machine|
+    config.vm.define machine[:hostname] do |node|
+      node.vm.box_download_insecure = true
+      node.vm.box = machine[:box]
+      node.vm.hostname = machine[:hostname]
+      node.vm.network "public_network", ip: machine[:ip], netmask: '255.255.0.0', gateway: '172.16.0.1', dns_nameserver: '172.16.0.3', dns_search: 'lab.domain.'
+      node.vm.provider "virtualbox" do |vb|
+        vb.name = machine[:hostname]
+        vb.customize ["modifyvm", :id, "--cpus", machine[:cpu]]
+        vb.customize ["modifyvm", :id, "--memory", machine[:ram]]
+        vb.customize ["modifyvm", :id, "--audio", "none"]
+        vb.customize ["modifyvm", :id, "--hwvirtex", "on"]
+        vb.customize ["modifyvm", :id, "--paravirtprovider", "kvm"]
+        vb.customize ["modifyvm", :id, "--groups", "/K8SLAB1"]
+      end
+
+      node.vm.provision "shell", inline: <<-SHELL
+
+sudo yum clean all
+sudo yum install yum-utils yum-config-manager -y --nogpgcheck
+sudo yum install epel-release vim -y --nogpgcheck
+sudo nice --15 yum update -y --nogpgcheck
+sudo systemctl disable firewalld.service
+sudo systemctl stop firewalld.service
+sudo setenforce 0
+sudo sed -i 's/^SELINUX=enforcing$/SELINUX=permissive/' /etc/selinux/config
+
+sudo modprobe br_netfilter
+sudo modprobe overlay
+sudo cat <<EOF | sudo tee /etc/modules-load.d/k8s-crio.conf
+overlay
+br_netfilter
+EOF
+
+sudo cat <<EOF | sudo tee /etc/sysctl.d/99-kubernetes-cri.conf
+net.bridge.bridge-nf-call-ip6tables = 1 
+net.bridge.bridge-nf-call-iptables = 1
+net.bridge.bridge-nf-call-arptables = 1
+kernel.sysrq = 16
+kernel.core_uses_pid = 1
+net.ipv4.ip_forward=1
+net.ipv4.conf.default.rp_filter = 1
+net.ipv4.conf.all.rp_filter = 1
+net.ipv4.conf.default.accept_source_route = 0
+net.ipv4.conf.all.accept_source_route = 0
+net.ipv4.conf.default.promote_secondaries = 1
+net.ipv4.conf.all.promote_secondaries = 1
+fs.protected_hardlinks = 1
+fs.protected_symlinks = 1
+EOF
+
+sudo sysctl --system
+sudo swapoff -a
+sudo sed -i '/swap/d' /etc/fstab
+
+sudo curl -s -L -o /etc/yum.repos.d/devel:kubic:libcontainers:stable.repo https://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/stable/CentOS_7/devel:kubic:libcontainers:stable.repo
+sudo curl -s -L -o /etc/yum.repos.d/devel:kubic:libcontainers:stable:cri-o:1.20.repo https://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/stable:/cri-o:/1.20/CentOS_7/devel:kubic:libcontainers:stable:cri-o:1.20.repo
+sudo yum install cri-o -y
+sudo cat <<EOF | sudo tee /etc/crio/crio.conf.d/02-cgroup-manager.conf
+[crio.runtime]
+conmon_cgroup = "pod"
+cgroup_manager = "cgroupfs"
+EOF
+sudo systemctl daemon-reload
+sudo systemctl enable --now crio
+        
+sudo cat <<EOF | sudo tee /etc/yum.repos.d/kubernetes.repo
+[kubernetes]
+name=Kubernetes
+baseurl=https://packages.cloud.google.com/yum/repos/kubernetes-el7-$(uname -p)
+enabled=1
+gpgcheck=1
+gpgkey=https://packages.cloud.google.com/yum/doc/yum-key.gpg https://packages.cloud.google.com/yum/doc/rpm-package-key.gpg
+EOF
+
+sudo yum install -y kubelet kubeadm kubectl
+sudo systemctl enable --now kubelet
+sudo yum clean all
+        
+        SHELL
+      
+    end
+  end
+end
